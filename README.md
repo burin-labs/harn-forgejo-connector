@@ -22,15 +22,27 @@ harn-forgejo-connector = { path = "../harn-forgejo-connector" }
 
 ## Webhook verification
 
-The connector accepts unsigned events only when no verification material is
-configured. Configure `signing_secret` for HMAC-based providers or `public_key`
-for SourceHut Ed25519 verification.
+Configure a `signing_secret` and the connector verifies the `x-gitea-signature` HMAC-SHA256
+header against the raw body using `verify_hmac_signature` from `std/connectors/shared`. With no
+secret configured the connector accepts unsigned events.
 
 ## Authentication
 
-Outbound calls use access token accepted by the Forgejo instance API. Pass `access_token`, `token`,
-`personal_access_token`, or `app_password` in the call args, or set the
-`FORGEJO_TOKEN` environment variable.
+Outbound calls use a token accepted by the Forgejo instance API. Pass `access_token`, `token`,
+`personal_access_token`, or `app_password` in the call args, or set the `FORGEJO_TOKEN`
+environment variable.
+
+## Rate limiting and pagination
+
+Outbound requests pass through a preemptive token bucket from `std/connectors/shared`
+(default 60 req/min, configurable via `rate_limit = { capacity, refill_tokens,
+refill_interval_ms }`; pass `rate_limit = { disabled = true }` to bypass it). Responses are
+inspected for `x-ratelimit-remaining`/`x-ratelimit-reset` and `429`, with a single retry once
+the reset window elapses.
+
+`pull_requests.list` and `issues.list` page through results using `paginate_cursor`. They
+follow `Link: <...>; rel="next"` when Forgejo returns one, falling back to `?page=` when a full
+page is returned without a `Link` header.
 
 ## Development
 

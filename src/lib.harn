@@ -1,12 +1,18 @@
+import {
+  paginate_cursor,
+  rate_limit_token_bucket,
+  verify_hmac_signature,
+} from "std/connectors/shared"
+
 let PROVIDER_ID = "forgejo"
 
 let STATE_KEY = "harn-forgejo-connector.state"
 
+let RATE_LIMIT_STATE_KEY = "harn-forgejo-connector.rate-limit"
+
 let DEFAULT_API_BASE_URL = "https://codeberg.org/api/v1"
 
 let ENV_PREFIX = "FORGEJO"
-
-let SIGNATURE_SCHEME = "gitea_hmac"
 
 let SIGNATURE_HEADER = "x-gitea-signature"
 
@@ -16,10 +22,22 @@ let SUPPORTED_EVENTS = ["push", "pull_request", "issues", "issue_comment", "rele
 
 let DELIVERY_HEADERS = ["x-gitea-delivery", "x-forgejo-delivery"]
 
+// Forgejo's default per-token quota mirrors Gitea: 60 requests/minute. Callers can override via
+// `rate_limit` args (see __rate_limit_acquire) or set `rate_limit.disabled = true` to bypass.
+let DEFAULT_RATE_LIMIT_CAPACITY = 60
+
+let DEFAULT_RATE_LIMIT_REFILL_INTERVAL_MS = 1000
+
+let MAX_RATE_LIMIT_WAIT_SECONDS = 60
+
+let MAX_PAGINATION_PAGES = 50
+
 let OUTBOUND_METHODS = [
   "api.request",
+  "pull_requests.list",
   "pull_requests.comment",
   "pull_requests.update",
+  "issues.list",
   "issues.comment",
   "commit_status.set",
   "repository_file.get",
@@ -88,6 +106,7 @@ pub fn activate(bindings = []) {
 /** Clear connector lifecycle state. */
 pub fn shutdown() {
   store_delete(STATE_KEY)
+  store_delete(RATE_LIMIT_STATE_KEY)
   return {provider: PROVIDER_ID, active: false}
 }
 
@@ -123,20 +142,6 @@ pub fn normalize_inbound(raw) {
   return {type: "event", event: event}
 }
 
-/** Run one polling tick for providers that support polling. */
-pub fn poll_tick(ctx = nil) {
-  if PROVIDER_ID != "svn" {
-    return {type: "batch", events: [], cursor: ctx?.cursor, state: ctx?.state ?? {}}
-  }
-  let cursor = ctx?.cursor ?? ctx?.state?.last_revision
-  return {
-    type: "batch",
-    events: [],
-    cursor: cursor,
-    state: {last_revision: cursor, repository_url: ctx?.repository_url},
-  }
-}
-
 @complexity(allow)
 /** Dispatch a supported outbound helper method. */
 pub fn call(method, args = {}) {
@@ -148,6 +153,9 @@ pub fn call(method, args = {}) {
   }
   if method == "api.request" {
     return __api_request(args ?? {})
+  }
+  if method == "pull_requests.list" {
+    return __paginate_list(args, "/repos/" + __repo_ref(args) + "/pulls")
   }
   if method == "pull_requests.comment" {
     return __api_request(
@@ -168,6 +176,9 @@ pub fn call(method, args = {}) {
         body: __body_without(args, __config_keys() + ["owner", "repo", "pull_request", "pull_request_id", "path"]),
       },
     )
+  }
+  if method == "issues.list" {
+    return __paginate_list(args, "/repos/" + __repo_ref(args) + "/issues")
   }
   if method == "issues.comment" {
     return __api_request(
@@ -257,11 +268,7 @@ fn __supports_event(event) {
   return false
 }
 
-@complexity(allow)
 fn __verify_signature(raw, headers, body_text) {
-  if SIGNATURE_SCHEME == "sourcehut_ed25519" {
-    return __verify_ed25519(raw, headers, body_text)
-  }
   let secret = __signing_secret(raw)
   if secret == nil || trim(to_string(secret)) == "" {
     return Ok("unsigned")
@@ -270,44 +277,10 @@ fn __verify_signature(raw, headers, body_text) {
   if provided == nil || provided == "" {
     return __err("missing_signature", SIGNATURE_HEADER + " header missing but a signing_secret is configured")
   }
-  let expected_hex = hmac_sha256(to_string(secret), body_text)
-  let expected = "sha256=" + expected_hex
-  if constant_time_eq(expected, to_string(provided))
-    || constant_time_eq(expected_hex, to_string(provided)) {
+  if verify_hmac_signature(body_text, to_string(provided), to_string(secret), "sha256") {
     return Ok("signed")
   }
   return __err("invalid_signature", SIGNATURE_HEADER + " did not match the configured signing_secret")
-}
-
-fn __verify_ed25519(raw, headers, body_text) {
-  let public_key = raw?.public_key ?? raw?.webhook_public_key ?? raw?.config?.public_key ?? raw?.secrets?.public_key
-  if public_key == nil || trim(to_string(public_key)) == "" {
-    return Ok("unsigned")
-  }
-  let signature = __header(headers, SIGNATURE_HEADER) ?? __header(headers, "x-srht-signature")
-    ?? __header(headers, "x-signature-ed25519")
-  if signature == nil || signature == "" {
-    return __err("missing_signature", "ed25519 signature header missing but public_key is configured")
-  }
-  let raw_signature = __strip_signature_prefix(signature)
-  let verified = try {
-    ed25519_verify(to_string(public_key), body_text, raw_signature)
-  }
-  if is_err(verified) || !unwrap(verified) {
-    return __err("invalid_signature", "ed25519 signature did not verify")
-  }
-  return Ok("signed")
-}
-
-fn __strip_signature_prefix(signature) {
-  let value = trim(to_string(signature))
-  if starts_with(value, "ed25519=") {
-    return value[8:len(value)]
-  }
-  if starts_with(value, "sha256=") {
-    return value[7:len(value)]
-  }
-  return value
 }
 
 fn __signing_secret(raw) {
@@ -399,7 +372,6 @@ fn __resource(payload) {
   return payload?.pull_request ?? payload?.pullrequest ?? payload?.issue ?? payload?.comment
     ?? payload?.release
     ?? payload?.object_attributes
-    ?? {revision: payload?.revision, changed_paths: payload?.changed_paths, commits: payload?.commits}
 }
 
 fn __dedupe_key(base_event, payload, raw, headers, body_text) {
@@ -435,7 +407,6 @@ fn __normalized_headers(headers) {
   return normalized
 }
 
-@complexity(allow)
 fn __outbound_config(args) {
   let env_base = ENV_PREFIX + "_API_BASE_URL"
   let env_token = ENV_PREFIX + "_TOKEN"
@@ -447,7 +418,15 @@ fn __outbound_config(args) {
 }
 
 fn __config_keys() {
-  return ["api_base_url", "access_token", "token", "personal_access_token", "app_password", "secrets"]
+  return [
+    "api_base_url",
+    "access_token",
+    "token",
+    "personal_access_token",
+    "app_password",
+    "secrets",
+    "rate_limit",
+  ]
 }
 
 fn __body_without(args, keys) {
@@ -458,15 +437,103 @@ fn __body_without(args, keys) {
   return body
 }
 
-@complexity(allow)
+fn __rate_limit_config(args) {
+  let cfg = args?.rate_limit ?? {}
+  return {
+    disabled: cfg?.disabled ?? false,
+    capacity: cfg?.capacity ?? DEFAULT_RATE_LIMIT_CAPACITY,
+    refill_tokens: cfg?.refill_tokens ?? 1,
+    refill_interval_ms: cfg?.refill_interval_ms ?? DEFAULT_RATE_LIMIT_REFILL_INTERVAL_MS,
+    scope: cfg?.scope ?? "default",
+  }
+}
+
+fn __rate_limit_acquire(args) {
+  let cfg = __rate_limit_config(args)
+  if cfg.disabled {
+    return Ok(true)
+  }
+  var buckets = store_get(RATE_LIMIT_STATE_KEY) ?? {}
+  let result = rate_limit_token_bucket(buckets.get(cfg.scope), cfg, nil)
+  buckets[cfg.scope] = result.state
+  store_set(RATE_LIMIT_STATE_KEY, buckets)
+  if result.allowed {
+    return Ok(true)
+  }
+  let wait_ms = result.retry_after_ms
+  if wait_ms > MAX_RATE_LIMIT_WAIT_SECONDS * 1000 {
+    return __err(
+      "rate_limited",
+      PROVIDER_ID + " local rate limit would block for " + to_string(wait_ms / 1000) + "s",
+    )
+  }
+  sleep(wait_ms)
+  return Ok(true)
+}
+
+fn __maybe_wait_for_provider_rate_limit(response) {
+  let remaining = __header(response.headers ?? {}, "x-ratelimit-remaining")
+  if remaining == nil || trim(to_string(remaining)) != "0" {
+    return Ok(false)
+  }
+  let reset = __header(response.headers ?? {}, "x-ratelimit-reset")
+  if reset == nil || trim(to_string(reset)) == "" {
+    return Ok(true)
+  }
+  let parsed_reset = try {
+    to_int(reset)
+  }
+  if is_err(parsed_reset) {
+    return Ok(true)
+  }
+  let wait_seconds = unwrap(parsed_reset) - to_int(timestamp())
+  if wait_seconds > MAX_RATE_LIMIT_WAIT_SECONDS {
+    return __err(
+      "rate_limited",
+      PROVIDER_ID + " API rate limit reset is more than " + to_string(MAX_RATE_LIMIT_WAIT_SECONDS)
+        + " seconds away",
+    )
+  }
+  if wait_seconds > 0 {
+    sleep(wait_seconds * 1000)
+  }
+  return Ok(true)
+}
+
+fn __is_rate_limit_response(response) {
+  if response.status == 429 {
+    return true
+  }
+  let remaining = __header(response.headers ?? {}, "x-ratelimit-remaining")
+  return remaining != nil && trim(to_string(remaining)) == "0"
+}
+
 fn __api_request(args) {
+  let response = __api_request_full(args ?? {})
+  if is_err(response) {
+    return response
+  }
+  let unwrapped = unwrap(response)
+  if unwrapped.body == "" {
+    return unwrapped
+  }
+  return unwrapped.body
+}
+
+@complexity(allow)
+fn __api_request_full(args) {
   let config = __outbound_config(args ?? {})
   if is_err(config) {
     return config
   }
   let cfg = unwrap(config)
+  let permit = __rate_limit_acquire(args ?? {})
+  if is_err(permit) {
+    return permit
+  }
   let method = uppercase(to_string(args?.method ?? "GET"))
   let path = args?.path ?? args?.url_path ?? ""
+  let url = __api_url(cfg.api_base_url, path)
   var options = {headers: {Accept: "application/json"}, retry: {max: 0, backoff_ms: 0}}
   if cfg.access_token != nil && trim(to_string(cfg.access_token)) != "" {
     options.headers["Authorization"] = "Bearer " + to_string(cfg.access_token)
@@ -475,26 +542,185 @@ fn __api_request(args) {
     options["body"] = json_stringify(args.body)
     options.headers["Content-Type"] = "application/json"
   }
-  let response_result = try {
-    http_request(method, __api_url(cfg.api_base_url, path), options)
+  return __dispatch_with_rate_limit(method, url, options)
+}
+
+@complexity(allow)
+fn __dispatch_with_rate_limit(method, url, options) {
+  var retried = false
+  while true {
+    let response_result = try {
+      http_request(method, url, options)
+    }
+    if is_err(response_result) {
+      return __err("transport", to_string(unwrap_err(response_result)))
+    }
+    let response = unwrap(response_result)
+    let waited = __maybe_wait_for_provider_rate_limit(response)
+    if is_err(waited) {
+      return waited
+    }
+    if (response.status == 429 || (response.status == 403 && unwrap(waited))) && !retried {
+      retried = true
+      continue
+    }
+    if response.status < 200 || response.status >= 300 {
+      let code = if __is_rate_limit_response(response) {
+        "rate_limited"
+      } else {
+        if response.status == 401 || response.status == 403 {
+          "unauthorized"
+        } else {
+          "transport"
+        }
+      }
+      return __err(
+        code,
+        PROVIDER_ID + " API request failed with status " + to_string(response.status) + ": "
+          + response.body ?? "",
+      )
+    }
+    let body_text = response.body ?? ""
+    if trim(body_text) == "" {
+      return Ok({status: response.status, headers: response.headers ?? {}, body: ""})
+    }
+    let parsed = try {
+      json_parse(body_text)
+    }
+    if is_err(parsed) {
+      return __err("invalid_response", PROVIDER_ID + " API returned invalid JSON")
+    }
+    return Ok({status: response.status, headers: response.headers ?? {}, body: unwrap(parsed)})
   }
-  if is_err(response_result) {
-    return __err("transport", to_string(unwrap_err(response_result)))
+}
+
+@complexity(allow)
+fn __paginate_list(args, default_path) {
+  let base_path = args?.path ?? default_path
+  let max_pages = args?.max_pages ?? MAX_PAGINATION_PAGES
+  let initial_url = base_path + __pagination_query(args)
+  var current_page = args?.page ?? 1
+  let result = paginate_cursor(
+    initial_url,
+    { url, cursor ->
+      let target_path = cursor ?? url
+      let response = __api_request_full(args + {method: "GET", path: target_path})
+      if is_err(response) {
+        return {items: [], _next_cursor: nil, _error: unwrap_err(response)}
+      }
+      let unwrapped = unwrap(response)
+      let body = unwrapped.body
+      let items = if type_of(body) == "list" {
+        body
+      } else {
+        body?.data ?? body?.items ?? body?.results ?? []
+      }
+      let next = __next_page_cursor(unwrapped, args, base_path, current_page)
+      current_page = current_page + 1
+      return {items: items, _next_cursor: next}
+    },
+    "/_next_cursor",
+    {items_path: "/items", max_pages: max_pages},
+  )
+  for page in result.pages {
+    if page?._error != nil {
+      return Err(page._error)
+    }
   }
-  let response = unwrap(response_result)
-  if response.status < 200 || response.status >= 300 {
-    return __err("transport", PROVIDER_ID + " API request failed with status " + to_string(response.status))
+  return {
+    items: result.items,
+    pages: len(result.pages),
+    complete: result.complete,
+    next_cursor: result.next_cursor,
   }
-  if trim(response.body ?? "") == "" {
-    return {status: response.status, headers: response.headers, body: ""}
+}
+
+// Forgejo deployments newer than 1.20 advertise pagination through `Link: rel="next"`. If the
+// caller passed an explicit `limit`/`per_page`, fall back to incrementing `?page=` so older
+// deployments still page through results when the body comes back full.
+@complexity(allow)
+fn __next_page_cursor(response, args, base_path, current_page) {
+  let link = __header(response.headers ?? {}, "link")
+  if link != nil && link != "" {
+    let next = __link_header_next(link)
+    if next != nil {
+      return __relative_path(next, __outbound_base_url(args))
+    }
   }
-  let parsed = try {
-    json_parse(response.body)
+  let limit = args?.limit ?? args?.per_page
+  if limit == nil {
+    return nil
   }
-  if is_err(parsed) {
-    return __err("invalid_response", PROVIDER_ID + " API returned invalid JSON")
+  let body = response.body
+  let body_count = if type_of(body) == "list" {
+    len(body)
+  } else {
+    len(body?.items ?? body?.data ?? body?.results ?? [])
   }
-  return unwrap(parsed)
+  if body_count == 0 || body_count < limit {
+    return nil
+  }
+  return base_path + __pagination_query(args + {page: current_page + 1, limit: limit})
+}
+
+fn __outbound_base_url(args) {
+  return args?.api_base_url ?? env_or(ENV_PREFIX + "_API_BASE_URL", DEFAULT_API_BASE_URL)
+}
+
+fn __link_header_next(link) {
+  for entry in split(link, ",") {
+    let trimmed = trim(entry)
+    if !contains(trimmed, "rel=\"next\"") && !contains(trimmed, "rel='next'")
+      && !contains(trimmed, "rel=next") {
+      continue
+    }
+    let after_open = split(trimmed, "<")
+    if len(after_open) < 2 {
+      continue
+    }
+    let inside = split(after_open[1], ">")
+    if len(inside) >= 1 && inside[0] != "" {
+      return inside[0]
+    }
+  }
+  return nil
+}
+
+fn __relative_path(url, base) {
+  let base_str = trim(to_string(base ?? ""))
+  if base_str != "" && starts_with(url, base_str) {
+    let suffix = url[len(base_str):len(url)]
+    if starts_with(suffix, "/") {
+      return suffix
+    }
+    return "/" + suffix
+  }
+  return url
+}
+
+@complexity(allow)
+fn __pagination_query(args) {
+  var parts = []
+  let limit = args?.limit ?? args?.per_page
+  if limit != nil {
+    parts = parts + ["limit=" + url_encode(to_string(limit))]
+  }
+  if args?.page != nil {
+    parts = parts + ["page=" + url_encode(to_string(args.page))]
+  }
+  if args?.state != nil {
+    parts = parts + ["state=" + url_encode(to_string(args.state))]
+  }
+  if args?.type != nil {
+    parts = parts + ["type=" + url_encode(to_string(args.type))]
+  }
+  if args?.sort != nil {
+    parts = parts + ["sort=" + url_encode(to_string(args.sort))]
+  }
+  if len(parts) == 0 {
+    return ""
+  }
+  return "?" + join(parts, "&")
 }
 
 fn __api_url(api_base_url, path) {
