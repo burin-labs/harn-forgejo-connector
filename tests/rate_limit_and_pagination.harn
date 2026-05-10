@@ -1,0 +1,202 @@
+import { call, shutdown } from "../src/lib"
+
+let API = "https://codeberg.org/api/v1"
+
+@complexity(allow)
+pipeline default() {
+  shutdown()
+  __test_rate_limit_429_retry()
+  __test_rate_limit_remaining_zero_retry()
+  __test_rate_limit_reset_too_far()
+  __test_preemptive_token_bucket()
+  __test_pagination_link_header()
+  __test_pagination_fallback_page_param()
+  __test_pagination_single_page()
+  shutdown()
+}
+
+@complexity(allow)
+fn __test_preemptive_token_bucket() {
+  http_mock_clear()
+  shutdown()
+  http_mock("GET", API + "/repos/acme/widgets", {status: 200, body: "{\"id\":1}", headers: {}})
+  let bucket_args = {
+    api_base_url: API,
+    access_token: "token",
+    path: "/repos/acme/widgets",
+    rate_limit: {capacity: 1, refill_tokens: 1, refill_interval_ms: 3600000, scope: "exhaust"},
+  }
+  let first = call("api.request", bucket_args)
+  assert_eq(first.id, 1, "first call consumes the only available token")
+  // The next acquire would block for the full refill window; the connector returns rate_limited
+  // instead of sleeping past the configured ceiling.
+  let second = call("api.request", bucket_args)
+  assert(is_err(second), "preemptive bucket throttles the second call")
+  assert_eq(unwrap_err(second).code, "rate_limited", "throttle uses the rate_limited code")
+  shutdown()
+}
+
+@complexity(allow)
+fn __test_rate_limit_429_retry() {
+  http_mock_clear()
+  http_mock(
+    "POST",
+    API + "/repos/acme/widgets/issues/7/comments",
+    {status: 429, body: "{\"message\":\"slow down\"}", headers: {"x-ratelimit-remaining": "5"}},
+  )
+  http_mock(
+    "POST",
+    API + "/repos/acme/widgets/issues/7/comments",
+    {status: 201, body: "{\"id\":101}", headers: {"x-ratelimit-remaining": "4"}},
+  )
+  let result = call(
+    "issues.comment",
+    {
+      api_base_url: API,
+      access_token: "token",
+      owner: "acme",
+      repo: "widgets",
+      issue: 7,
+      body: "hello",
+      rate_limit: {disabled: true},
+    },
+  )
+  assert_eq(result.id, 101, "429 triggers a single retry that succeeds")
+}
+
+@complexity(allow)
+fn __test_rate_limit_remaining_zero_retry() {
+  http_mock_clear()
+  let near_now = to_int(timestamp())
+  http_mock(
+    "GET",
+    API + "/repos/acme/widgets",
+    {
+      status: 200,
+      body: "{\"id\":1,\"name\":\"widgets\"}",
+      headers: {"x-ratelimit-remaining": "0", "x-ratelimit-reset": to_string(near_now)},
+    },
+  )
+  let result = call(
+    "api.request",
+    {
+      api_base_url: API,
+      access_token: "token",
+      path: "/repos/acme/widgets",
+      rate_limit: {disabled: true},
+    },
+  )
+  assert_eq(result.id, 1, "remaining=0 with elapsed reset returns the body without erroring")
+}
+
+@complexity(allow)
+fn __test_rate_limit_reset_too_far() {
+  http_mock_clear()
+  let far_future = to_int(timestamp()) + 600
+  http_mock(
+    "GET",
+    API + "/repos/acme/widgets",
+    {
+      status: 429,
+      body: "{}",
+      headers: {"x-ratelimit-remaining": "0", "x-ratelimit-reset": to_string(far_future)},
+    },
+  )
+  let result = call(
+    "api.request",
+    {
+      api_base_url: API,
+      access_token: "token",
+      path: "/repos/acme/widgets",
+      rate_limit: {disabled: true},
+    },
+  )
+  assert(is_err(result), "rate limit reset further than the configured wait window returns an error")
+  assert_eq(unwrap_err(result).code, "rate_limited", "error code is rate_limited")
+}
+
+@complexity(allow)
+fn __test_pagination_link_header() {
+  http_mock_clear()
+  let page1_path = "/repos/acme/widgets/pulls?limit=2"
+  let page2_path = "/repos/acme/widgets/pulls?limit=2&page=2"
+  http_mock(
+    "GET",
+    API + page1_path,
+    {
+      status: 200,
+      body: "[{\"number\":1,\"title\":\"first\"},{\"number\":2,\"title\":\"second\"}]",
+      headers: {
+        link: "<" + API + page2_path + ">; rel=\"next\", <" + API + page2_path + ">; rel=\"last\"",
+        "x-total-count": "3",
+      },
+    },
+  )
+  http_mock(
+    "GET",
+    API + page2_path,
+    {status: 200, body: "[{\"number\":3,\"title\":\"third\"}]", headers: {"x-total-count": "3"}},
+  )
+  let result = call(
+    "pull_requests.list",
+    {
+      api_base_url: API,
+      access_token: "token",
+      owner: "acme",
+      repo: "widgets",
+      limit: 2,
+      rate_limit: {disabled: true},
+    },
+  )
+  assert_eq(len(result.items), 3, "items collected across two pages")
+  assert_eq(result.pages, 2, "two pages fetched")
+  assert_eq(result.complete, true, "pagination ran to completion")
+  assert_eq(result.items[2].title, "third", "page 2 items present")
+}
+
+@complexity(allow)
+fn __test_pagination_fallback_page_param() {
+  http_mock_clear()
+  let path1 = "/repos/acme/widgets/issues?limit=2&state=open"
+  let path2 = "/repos/acme/widgets/issues?limit=2&page=2&state=open"
+  http_mock("GET", API + path1, {status: 200, body: "[{\"number\":1},{\"number\":2}]", headers: {}})
+  http_mock("GET", API + path2, {status: 200, body: "[{\"number\":3}]", headers: {}})
+  let result = call(
+    "issues.list",
+    {
+      api_base_url: API,
+      access_token: "token",
+      owner: "acme",
+      repo: "widgets",
+      limit: 2,
+      state: "open",
+      rate_limit: {disabled: true},
+    },
+  )
+  assert_eq(len(result.items), 3, "page param fallback collects items when Link is absent")
+  assert_eq(result.complete, true, "pagination completes once a partial page is returned")
+}
+
+@complexity(allow)
+fn __test_pagination_single_page() {
+  http_mock_clear()
+  http_mock(
+    "GET",
+    API + "/repos/acme/widgets/pulls?limit=10",
+    {status: 200, body: "[{\"number\":1}]", headers: {}},
+  )
+  let result = call(
+    "pull_requests.list",
+    {
+      api_base_url: API,
+      access_token: "token",
+      owner: "acme",
+      repo: "widgets",
+      limit: 10,
+      rate_limit: {disabled: true},
+    },
+  )
+  assert_eq(len(result.items), 1, "single short page completes immediately")
+  assert_eq(result.pages, 1, "exactly one fetch")
+  assert_eq(result.complete, true, "single page is complete")
+}

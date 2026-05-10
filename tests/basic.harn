@@ -5,7 +5,6 @@ import {
   kinds,
   normalize_inbound,
   payload_schema,
-  poll_tick,
   provider_id,
   shutdown,
 } from "../src/lib"
@@ -28,13 +27,26 @@ pipeline default() {
   assert_eq(normalized.event.kind, "pull_request.opened", "event kind")
   assert_eq(normalized.event.signature_status.state, "verified", "signed status")
   assert(normalized.event.dedupe_key != nil && normalized.event.dedupe_key != "", "dedupe key")
+  let raw_hex = normalize_inbound(
+    {
+      signing_secret: "secret",
+      body_text: body,
+      headers: headers + {"x-gitea-signature": hmac_sha256("secret", body)},
+    },
+  )
+  assert_eq(raw_hex.event.signature_status.state, "verified", "raw-hex signature accepted")
   let bad_signature = normalize_inbound(
     {signing_secret: "secret", body_text: body, headers: headers + {"x-gitea-signature": "sha256=00"}},
   )
   assert_eq(bad_signature.type, "reject", "bad signature rejects")
   assert_eq(bad_signature.reject.status, 401, "bad signature status")
+  let missing_signature = normalize_inbound({signing_secret: "secret", body_text: body, headers: headers})
+  assert_eq(missing_signature.type, "reject", "missing signature rejects")
+  assert_eq(missing_signature.reject.status, 401, "missing signature status")
   let invalid_json = normalize_inbound({body_text: "{bad json", headers: headers})
   assert_eq(invalid_json.type, "reject", "invalid json rejects")
+  let unsupported = normalize_inbound({body_text: "{}", headers: {"x-gitea-event": "deploy_key"}})
+  assert_eq(unsupported.type, "reject", "unsupported event rejects")
   http_mock_clear()
   http_mock(
     "GET",
@@ -43,11 +55,16 @@ pipeline default() {
   )
   let response = call(
     "api.request",
-    {api_base_url: "https://codeberg.org/api/v1", path: "/projects", access_token: "token"},
+    {
+      api_base_url: "https://codeberg.org/api/v1",
+      path: "/projects",
+      access_token: "token",
+      rate_limit: {disabled: true},
+    },
   )
-  assert_eq(response.ok, true, "api request")
-  let unsupported = call("unknown", {})
-  assert(is_err(unsupported), "unknown method errors")
+  assert_eq(response.ok, true, "api request returns parsed body")
+  let unsupported_method = call("unknown", {})
+  assert(is_err(unsupported_method), "unknown method errors")
   http_mock_clear()
   shutdown()
 }
