@@ -13,6 +13,31 @@ default = "src/lib.harn"
 id = "forgejo"
 connector = { harn = "src/lib.harn" }
 
+[providers.setup]
+auth_type = "api-key"
+flow = "api-key"
+required_secrets = ["forgejo/api-token", "forgejo/webhook-secret"]
+setup_command = ["harn", "connect", "forgejo"]
+validation_command = ["harn", "connect", "status", "--connector", "forgejo", "--json"]
+
+[[providers.setup.health_checks]]
+id = "api-token"
+kind = "secret"
+secret = "forgejo/api-token"
+
+[[providers.setup.health_checks]]
+id = "webhook-secret"
+kind = "secret"
+secret = "forgejo/webhook-secret"
+
+[providers.setup.recovery]
+missing_auth = "Store forgejo/api-token and forgejo/webhook-secret before enabling Forgejo bindings."
+expired_credentials = "Rotate forgejo/api-token, then rerun the Forgejo connection validation."
+revoked_credentials = "Replace forgejo/api-token with an active Forgejo personal access token."
+missing_scopes = "Grant repository and pull request scopes required by the configured Forgejo workflows."
+inaccessible_resource = "Confirm the token can access the target Forgejo host, owner, and repository."
+transient_provider_outage = "Retry after the Forgejo host API and webhook endpoints are healthy."
+
 [dependencies]
 
 [connector_contract]
