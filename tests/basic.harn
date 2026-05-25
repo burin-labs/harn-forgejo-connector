@@ -75,6 +75,7 @@ pipeline default() {
     },
   )
   assert(is_err(ssrf), "absolute URL path rejected")
+  egress_policy({allow: ["codeberg.org"], default: "deny"})
   http_mock_clear()
   http_mock(
     "GET",

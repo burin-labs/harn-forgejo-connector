@@ -5,6 +5,7 @@ let API = "https://codeberg.org/api/v1"
 @complexity(allow)
 pipeline default() {
   shutdown()
+  egress_policy({allow: ["codeberg.org"], default: "deny"})
   __test_rate_limit_429_retry()
   __test_rate_limit_remaining_zero_retry()
   __test_rate_limit_reset_too_far()
@@ -67,7 +68,7 @@ fn __test_rate_limit_429_retry() {
 @complexity(allow)
 fn __test_rate_limit_remaining_zero_retry() {
   http_mock_clear()
-  let near_now = to_int(timestamp())
+  let near_now = to_int(harness.clock.timestamp())
   http_mock(
     "GET",
     API + "/repos/acme/widgets",
@@ -92,7 +93,7 @@ fn __test_rate_limit_remaining_zero_retry() {
 @complexity(allow)
 fn __test_rate_limit_reset_too_far() {
   http_mock_clear()
-  let far_future = to_int(timestamp()) + 600
+  let far_future = to_int(harness.clock.timestamp()) + 600
   http_mock(
     "GET",
     API + "/repos/acme/widgets",
