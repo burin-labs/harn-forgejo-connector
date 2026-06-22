@@ -85,7 +85,7 @@ pub fn activate(bindings = []) {
   var by_id = {}
   var seen_paths = {}
   for binding in bindings ?? [] {
-    let binding_id = binding?.binding_id ?? binding?.id ?? "binding-" + to_string(len(by_id.keys()))
+    let binding_id = (binding?.binding_id ?? binding?.id ?? "binding-") + to_string(len(by_id.keys()))
     let path = binding?.path ?? binding?.match?.path
     if path != nil && path != "" {
       if seen_paths.get(path) {
@@ -643,7 +643,7 @@ fn __config_keys() {
 }
 
 fn __body_without(args, keys) {
-  let body = args ?? {} + {}
+  let body = (args ?? {}) + {}
   for key in keys {
     body.remove(key)
   }
@@ -792,7 +792,7 @@ fn __dispatch_with_rate_limit(method, url, options) {
       return __err(
         code,
         PROVIDER_ID + " API request failed with status " + to_string(response.status) + ": "
-          + response.body ?? "",
+          + (response.body ?? ""),
       )
     }
     let body_text = response.body ?? ""
