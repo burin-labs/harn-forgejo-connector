@@ -1,6 +1,6 @@
 import { call, shutdown } from "../src/lib"
 
-let API = "https://codeberg.org/api/v1"
+const API = "https://codeberg.org/api/v1"
 
 @complexity(allow)
 pipeline default() {
@@ -21,17 +21,17 @@ fn __test_preemptive_token_bucket() {
   http_mock_clear()
   shutdown()
   http_mock("GET", API + "/repos/acme/widgets", {status: 200, body: "{\"id\":1}", headers: {}})
-  let bucket_args = {
+  const bucket_args = {
     api_base_url: API,
     access_token: "token",
     path: "/repos/acme/widgets",
     rate_limit: {capacity: 1, refill_tokens: 1, refill_interval_ms: 3600000, scope: "exhaust"},
   }
-  let first = call("api.request", bucket_args)
+  const first = call("api.request", bucket_args)
   assert_eq(first.id, 1, "first call consumes the only available token")
   // The next acquire would block for the full refill window; the connector returns rate_limited
   // instead of sleeping past the configured ceiling.
-  let second = call("api.request", bucket_args)
+  const second = call("api.request", bucket_args)
   assert(is_err(second), "preemptive bucket throttles the second call")
   assert_eq(unwrap_err(second).code, "rate_limited", "throttle uses the rate_limited code")
   shutdown()
@@ -50,7 +50,7 @@ fn __test_rate_limit_429_retry() {
     API + "/repos/acme/widgets/issues/7/comments",
     {status: 201, body: "{\"id\":101}", headers: {"x-ratelimit-remaining": "4"}},
   )
-  let result = call(
+  const result = call(
     "issues.comment",
     {
       api_base_url: API,
@@ -68,7 +68,7 @@ fn __test_rate_limit_429_retry() {
 @complexity(allow)
 fn __test_rate_limit_remaining_zero_retry() {
   http_mock_clear()
-  let near_now = to_int(harness.clock.timestamp())
+  const near_now = to_int(harness.clock.timestamp())
   http_mock(
     "GET",
     API + "/repos/acme/widgets",
@@ -78,7 +78,7 @@ fn __test_rate_limit_remaining_zero_retry() {
       headers: {"x-ratelimit-remaining": "0", "x-ratelimit-reset": to_string(near_now)},
     },
   )
-  let result = call(
+  const result = call(
     "api.request",
     {
       api_base_url: API,
@@ -93,7 +93,7 @@ fn __test_rate_limit_remaining_zero_retry() {
 @complexity(allow)
 fn __test_rate_limit_reset_too_far() {
   http_mock_clear()
-  let far_future = to_int(harness.clock.timestamp()) + 600
+  const far_future = to_int(harness.clock.timestamp()) + 600
   http_mock(
     "GET",
     API + "/repos/acme/widgets",
@@ -103,7 +103,7 @@ fn __test_rate_limit_reset_too_far() {
       headers: {"x-ratelimit-remaining": "0", "x-ratelimit-reset": to_string(far_future)},
     },
   )
-  let result = call(
+  const result = call(
     "api.request",
     {
       api_base_url: API,
@@ -119,8 +119,8 @@ fn __test_rate_limit_reset_too_far() {
 @complexity(allow)
 fn __test_pagination_link_header() {
   http_mock_clear()
-  let page1_path = "/repos/acme/widgets/pulls?limit=2"
-  let page2_path = "/repos/acme/widgets/pulls?limit=2&page=2"
+  const page1_path = "/repos/acme/widgets/pulls?limit=2"
+  const page2_path = "/repos/acme/widgets/pulls?limit=2&page=2"
   http_mock(
     "GET",
     API + page1_path,
@@ -138,7 +138,7 @@ fn __test_pagination_link_header() {
     API + page2_path,
     {status: 200, body: "[{\"number\":3,\"title\":\"third\"}]", headers: {"x-total-count": "3"}},
   )
-  let result = call(
+  const result = call(
     "pull_requests.list",
     {
       api_base_url: API,
@@ -158,11 +158,11 @@ fn __test_pagination_link_header() {
 @complexity(allow)
 fn __test_pagination_fallback_page_param() {
   http_mock_clear()
-  let path1 = "/repos/acme/widgets/issues?limit=2&state=open"
-  let path2 = "/repos/acme/widgets/issues?limit=2&page=2&state=open"
+  const path1 = "/repos/acme/widgets/issues?limit=2&state=open"
+  const path2 = "/repos/acme/widgets/issues?limit=2&page=2&state=open"
   http_mock("GET", API + path1, {status: 200, body: "[{\"number\":1},{\"number\":2}]", headers: {}})
   http_mock("GET", API + path2, {status: 200, body: "[{\"number\":3}]", headers: {}})
-  let result = call(
+  const result = call(
     "issues.list",
     {
       api_base_url: API,
@@ -186,7 +186,7 @@ fn __test_pagination_single_page() {
     API + "/repos/acme/widgets/pulls?limit=10",
     {status: 200, body: "[{\"number\":1}]", headers: {}},
   )
-  let result = call(
+  const result = call(
     "pull_requests.list",
     {
       api_base_url: API,

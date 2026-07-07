@@ -17,18 +17,18 @@ pipeline default() {
   assert_eq(payload_schema().harn_schema_name, "ForgejoEventPayload", "schema")
   // Seed the signing secret via init/activate — never via inbound `raw.*` fields.
   init({signing_secret: "secret"})
-  let activated = activate([{id: "primary", path: "/hooks/forgejo", secrets: {signing_secret: "secret"}}])
+  const activated = activate([{id: "primary", path: "/hooks/forgejo", secrets: {signing_secret: "secret"}}])
   assert_eq(activated.bindings, 1, "activation count")
-  let body = "{\"action\":\"opened\",\"repository\":{\"full_name\":\"acme/widgets\",\"html_url\":\"https://codeberg.org/acme/widgets\"},\"sender\":{\"login\":\"ada\"},\"pull_request\":{\"number\":42,\"title\":\"Improve widgets\"}}"
-  let headers = {"x-gitea-event": "pull_request", "x-gitea-delivery": "delivery-1"}
-  let signature = "sha256=" + hmac_sha256("secret", body)
-  let raw = {binding_id: "primary", body_text: body, headers: headers + {"x-gitea-signature": signature}}
-  let normalized = normalize_inbound(raw)
+  const body = "{\"action\":\"opened\",\"repository\":{\"full_name\":\"acme/widgets\",\"html_url\":\"https://codeberg.org/acme/widgets\"},\"sender\":{\"login\":\"ada\"},\"pull_request\":{\"number\":42,\"title\":\"Improve widgets\"}}"
+  const headers = {"x-gitea-event": "pull_request", "x-gitea-delivery": "delivery-1"}
+  const signature = "sha256=" + hmac_sha256("secret", body)
+  const raw = {binding_id: "primary", body_text: body, headers: headers + {"x-gitea-signature": signature}}
+  const normalized = normalize_inbound(raw)
   assert_eq(normalized.type, "event", "envelope type")
   assert_eq(normalized.event.kind, "pull_request.opened", "event kind")
   assert_eq(normalized.event.signature_status.state, "verified", "signed status")
   assert(normalized.event.dedupe_key != nil && normalized.event.dedupe_key != "", "dedupe key")
-  let raw_hex = normalize_inbound(
+  const raw_hex = normalize_inbound(
     {
       binding_id: "primary",
       body_text: body,
@@ -36,15 +36,15 @@ pipeline default() {
     },
   )
   assert_eq(raw_hex.event.signature_status.state, "verified", "raw-hex signature accepted")
-  let bad_signature = normalize_inbound(
+  const bad_signature = normalize_inbound(
     {binding_id: "primary", body_text: body, headers: headers + {"x-gitea-signature": "sha256=00"}},
   )
   assert_eq(bad_signature.type, "reject", "bad signature rejects")
   assert_eq(bad_signature.reject.status, 401, "bad signature status")
-  let missing_signature = normalize_inbound({binding_id: "primary", body_text: body, headers: headers})
+  const missing_signature = normalize_inbound({binding_id: "primary", body_text: body, headers: headers})
   assert_eq(missing_signature.type, "reject", "missing signature rejects")
   assert_eq(missing_signature.reject.status, 401, "missing signature status")
-  let invalid_json = normalize_inbound(
+  const invalid_json = normalize_inbound(
     {
       binding_id: "primary",
       body_text: "{bad json",
@@ -52,7 +52,7 @@ pipeline default() {
     },
   )
   assert_eq(invalid_json.type, "reject", "invalid json rejects")
-  let unsupported = normalize_inbound(
+  const unsupported = normalize_inbound(
     {
       binding_id: "primary",
       body_text: "{}",
@@ -61,11 +61,11 @@ pipeline default() {
   )
   assert_eq(unsupported.type, "reject", "unsupported event rejects")
   // F8: missing binding_id is fail-closed.
-  let no_binding = normalize_inbound({body_text: body, headers: headers + {"x-gitea-signature": signature}})
+  const no_binding = normalize_inbound({body_text: body, headers: headers + {"x-gitea-signature": signature}})
   assert_eq(no_binding.type, "reject", "missing binding_id rejects")
   assert_eq(no_binding.reject.status, 400, "missing binding_id 400")
   // F1: absolute-URL path in api.request is rejected (SSRF guard).
-  let ssrf = call(
+  const ssrf = call(
     "api.request",
     {
       api_base_url: "https://codeberg.org/api/v1",
@@ -82,7 +82,7 @@ pipeline default() {
     "https://codeberg.org/api/v1/projects",
     {status: 200, body: json_stringify({ok: true})},
   )
-  let response = call(
+  const response = call(
     "api.request",
     {
       api_base_url: "https://codeberg.org/api/v1",
@@ -92,7 +92,7 @@ pipeline default() {
     },
   )
   assert_eq(response.ok, true, "api request returns parsed body")
-  let unsupported_method = call("unknown", {})
+  const unsupported_method = call("unknown", {})
   assert(is_err(unsupported_method), "unknown method errors")
   http_mock_clear()
   shutdown()
