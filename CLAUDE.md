@@ -9,7 +9,7 @@ Shared Harn connector authoring rules live in the canonical guide:
 Keep this file limited to provider-specific notes and local hazards. Add shared connector guidance
 to the Harn guide first.
 
-## Provider Notes
+## Provider notes
 
 - Webhook event names use `x-gitea-event`; delivery ids may be `x-gitea-delivery` or
   `x-forgejo-delivery`.
