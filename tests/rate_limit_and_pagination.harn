@@ -112,7 +112,10 @@ fn __test_rate_limit_reset_too_far() {
       rate_limit: {disabled: true},
     },
   )
-  assert(is_err(result), "rate limit reset further than the configured wait window returns an error")
+  assert(
+    is_err(result),
+    "rate limit reset further than the configured wait window returns an error",
+  )
   assert_eq(unwrap_err(result).code, "rate_limited", "error code is rate_limited")
 }
 

@@ -17,12 +17,19 @@ pipeline default() {
   assert_eq(payload_schema().harn_schema_name, "ForgejoEventPayload", "schema")
   // Seed the signing secret via init/activate — never via inbound `raw.*` fields.
   init({signing_secret: "secret"})
-  const activated = activate([{id: "primary", path: "/hooks/forgejo", secrets: {signing_secret: "secret"}}])
+  const activated = activate(
+    [{id: "primary", path: "/hooks/forgejo", secrets: {signing_secret: "secret"}}],
+  )
   assert_eq(activated.bindings, 1, "activation count")
-  const body = "{\"action\":\"opened\",\"repository\":{\"full_name\":\"acme/widgets\",\"html_url\":\"https://codeberg.org/acme/widgets\"},\"sender\":{\"login\":\"ada\"},\"pull_request\":{\"number\":42,\"title\":\"Improve widgets\"}}"
+  const body =
+    "{\"action\":\"opened\",\"repository\":{\"full_name\":\"acme/widgets\",\"html_url\":\"https://codeberg.org/acme/widgets\"},\"sender\":{\"login\":\"ada\"},\"pull_request\":{\"number\":42,\"title\":\"Improve widgets\"}}"
   const headers = {"x-gitea-event": "pull_request", "x-gitea-delivery": "delivery-1"}
   const signature = "sha256=" + hmac_sha256("secret", body)
-  const raw = {binding_id: "primary", body_text: body, headers: headers + {"x-gitea-signature": signature}}
+  const raw = {
+    binding_id: "primary",
+    body_text: body,
+    headers: headers + {"x-gitea-signature": signature},
+  }
   const normalized = normalize_inbound(raw)
   assert_eq(normalized.type, "event", "envelope type")
   assert_eq(normalized.event.kind, "pull_request.opened", "event kind")
@@ -41,7 +48,9 @@ pipeline default() {
   )
   assert_eq(bad_signature.type, "reject", "bad signature rejects")
   assert_eq(bad_signature.reject.status, 401, "bad signature status")
-  const missing_signature = normalize_inbound({binding_id: "primary", body_text: body, headers: headers})
+  const missing_signature = normalize_inbound(
+    {binding_id: "primary", body_text: body, headers: headers},
+  )
   assert_eq(missing_signature.type, "reject", "missing signature rejects")
   assert_eq(missing_signature.reject.status, 401, "missing signature status")
   const invalid_json = normalize_inbound(
@@ -56,12 +65,17 @@ pipeline default() {
     {
       binding_id: "primary",
       body_text: "{}",
-      headers: {"x-gitea-event": "deploy_key", "x-gitea-signature": "sha256=" + hmac_sha256("secret", "{}")},
+      headers: {
+        "x-gitea-event": "deploy_key",
+        "x-gitea-signature": "sha256=" + hmac_sha256("secret", "{}"),
+      },
     },
   )
   assert_eq(unsupported.type, "reject", "unsupported event rejects")
   // F8: missing binding_id is fail-closed.
-  const no_binding = normalize_inbound({body_text: body, headers: headers + {"x-gitea-signature": signature}})
+  const no_binding = normalize_inbound(
+    {body_text: body, headers: headers + {"x-gitea-signature": signature}},
+  )
   assert_eq(no_binding.type, "reject", "missing binding_id rejects")
   assert_eq(no_binding.reject.status, 400, "missing binding_id 400")
   // F1: absolute-URL path in api.request is rejected (SSRF guard).
