@@ -3,54 +3,59 @@ import { call, shutdown } from "../src/lib"
 const API = "https://codeberg.org/api/v1"
 
 @complexity(allow)
-pipeline default() {
-  shutdown()
-  egress_policy({allow: ["codeberg.org"], default: "deny"})
-  __test_rate_limit_429_retry()
-  __test_rate_limit_remaining_zero_retry()
-  __test_rate_limit_reset_too_far()
-  __test_preemptive_token_bucket()
-  __test_pagination_link_header()
-  __test_pagination_fallback_page_param()
-  __test_pagination_single_page()
-  shutdown()
+pipeline default(harness: Harness) {
+  shutdown(harness)
+  harness.net.egress_policy({allow: ["codeberg.org"], default: "deny"})
+  __test_rate_limit_429_retry(harness)
+  __test_rate_limit_remaining_zero_retry(harness)
+  __test_rate_limit_reset_too_far(harness)
+  __test_preemptive_token_bucket(harness)
+  __test_pagination_link_header(harness)
+  __test_pagination_fallback_page_param(harness)
+  __test_pagination_single_page(harness)
+  shutdown(harness)
 }
 
 @complexity(allow)
-fn __test_preemptive_token_bucket() {
-  http_mock_clear()
-  shutdown()
-  http_mock("GET", API + "/repos/acme/widgets", {status: 200, body: "{\"id\":1}", headers: {}})
+fn __test_preemptive_token_bucket(harness: Harness) {
+  harness.testing.http_mock_clear()
+  shutdown(harness)
+  harness.testing.http_mock(
+    "GET",
+    API + "/repos/acme/widgets",
+    {status: 200, body: "{\"id\":1}", headers: {}},
+  )
   const bucket_args = {
     api_base_url: API,
     access_token: "token",
     path: "/repos/acme/widgets",
     rate_limit: {capacity: 1, refill_tokens: 1, refill_interval_ms: 3600000, scope: "exhaust"},
   }
-  const first = call("api.request", bucket_args)
+  const first = call(harness, "api.request", bucket_args)
   assert_eq(first.id, 1, "first call consumes the only available token")
   // The next acquire would block for the full refill window; the connector returns rate_limited
   // instead of sleeping past the configured ceiling.
-  const second = call("api.request", bucket_args)
+  const second = call(harness, "api.request", bucket_args)
   assert(is_err(second), "preemptive bucket throttles the second call")
   assert_eq(unwrap_err(second).code, "rate_limited", "throttle uses the rate_limited code")
-  shutdown()
+  shutdown(harness)
 }
 
 @complexity(allow)
-fn __test_rate_limit_429_retry() {
-  http_mock_clear()
-  http_mock(
+fn __test_rate_limit_429_retry(harness: Harness) {
+  harness.testing.http_mock_clear()
+  harness.testing.http_mock(
     "POST",
     API + "/repos/acme/widgets/issues/7/comments",
     {status: 429, body: "{\"message\":\"slow down\"}", headers: {"x-ratelimit-remaining": "5"}},
   )
-  http_mock(
+  harness.testing.http_mock(
     "POST",
     API + "/repos/acme/widgets/issues/7/comments",
     {status: 201, body: "{\"id\":101}", headers: {"x-ratelimit-remaining": "4"}},
   )
   const result = call(
+    harness,
     "issues.comment",
     {
       api_base_url: API,
@@ -66,10 +71,10 @@ fn __test_rate_limit_429_retry() {
 }
 
 @complexity(allow)
-fn __test_rate_limit_remaining_zero_retry() {
-  http_mock_clear()
+fn __test_rate_limit_remaining_zero_retry(harness: Harness) {
+  harness.testing.http_mock_clear()
   const near_now = to_int(harness.clock.timestamp())
-  http_mock(
+  harness.testing.http_mock(
     "GET",
     API + "/repos/acme/widgets",
     {
@@ -79,6 +84,7 @@ fn __test_rate_limit_remaining_zero_retry() {
     },
   )
   const result = call(
+    harness,
     "api.request",
     {
       api_base_url: API,
@@ -91,10 +97,10 @@ fn __test_rate_limit_remaining_zero_retry() {
 }
 
 @complexity(allow)
-fn __test_rate_limit_reset_too_far() {
-  http_mock_clear()
+fn __test_rate_limit_reset_too_far(harness: Harness) {
+  harness.testing.http_mock_clear()
   const far_future = to_int(harness.clock.timestamp()) + 600
-  http_mock(
+  harness.testing.http_mock(
     "GET",
     API + "/repos/acme/widgets",
     {
@@ -104,6 +110,7 @@ fn __test_rate_limit_reset_too_far() {
     },
   )
   const result = call(
+    harness,
     "api.request",
     {
       api_base_url: API,
@@ -120,11 +127,11 @@ fn __test_rate_limit_reset_too_far() {
 }
 
 @complexity(allow)
-fn __test_pagination_link_header() {
-  http_mock_clear()
+fn __test_pagination_link_header(harness: Harness) {
+  harness.testing.http_mock_clear()
   const page1_path = "/repos/acme/widgets/pulls?limit=2"
   const page2_path = "/repos/acme/widgets/pulls?limit=2&page=2"
-  http_mock(
+  harness.testing.http_mock(
     "GET",
     API + page1_path,
     {
@@ -136,12 +143,13 @@ fn __test_pagination_link_header() {
       },
     },
   )
-  http_mock(
+  harness.testing.http_mock(
     "GET",
     API + page2_path,
     {status: 200, body: "[{\"number\":3,\"title\":\"third\"}]", headers: {"x-total-count": "3"}},
   )
   const result = call(
+    harness,
     "pull_requests.list",
     {
       api_base_url: API,
@@ -159,13 +167,22 @@ fn __test_pagination_link_header() {
 }
 
 @complexity(allow)
-fn __test_pagination_fallback_page_param() {
-  http_mock_clear()
+fn __test_pagination_fallback_page_param(harness: Harness) {
+  harness.testing.http_mock_clear()
   const path1 = "/repos/acme/widgets/issues?limit=2&state=open"
   const path2 = "/repos/acme/widgets/issues?limit=2&page=2&state=open"
-  http_mock("GET", API + path1, {status: 200, body: "[{\"number\":1},{\"number\":2}]", headers: {}})
-  http_mock("GET", API + path2, {status: 200, body: "[{\"number\":3}]", headers: {}})
+  harness.testing.http_mock(
+    "GET",
+    API + path1,
+    {status: 200, body: "[{\"number\":1},{\"number\":2}]", headers: {}},
+  )
+  harness.testing.http_mock(
+    "GET",
+    API + path2,
+    {status: 200, body: "[{\"number\":3}]", headers: {}},
+  )
   const result = call(
+    harness,
     "issues.list",
     {
       api_base_url: API,
@@ -182,14 +199,15 @@ fn __test_pagination_fallback_page_param() {
 }
 
 @complexity(allow)
-fn __test_pagination_single_page() {
-  http_mock_clear()
-  http_mock(
+fn __test_pagination_single_page(harness: Harness) {
+  harness.testing.http_mock_clear()
+  harness.testing.http_mock(
     "GET",
     API + "/repos/acme/widgets/pulls?limit=10",
     {status: 200, body: "[{\"number\":1}]", headers: {}},
   )
   const result = call(
+    harness,
     "pull_requests.list",
     {
       api_base_url: API,
