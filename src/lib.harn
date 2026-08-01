@@ -717,7 +717,7 @@ fn __rate_limit_acquire(harness: Harness, args) {
     return Ok(true)
   }
   let buckets = harness.runtime.store_get(RATE_LIMIT_STATE_KEY) ?? {}
-  const result = rate_limit_token_bucket(buckets.get(cfg.scope), cfg, nil)
+  const result = rate_limit_token_bucket(harness.clock, buckets.get(cfg.scope), cfg, nil)
   buckets[cfg.scope] = result.state
   harness.runtime.store_set(RATE_LIMIT_STATE_KEY, buckets)
   if result.allowed {
