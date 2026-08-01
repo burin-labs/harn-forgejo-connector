@@ -82,14 +82,14 @@ pub fn payload_schema() {
 }
 
 /** Initialize connector state with orchestrator context. */
-pub fn init(ctx = nil) {
-  const next = __state() + {initialized: true, ctx: ctx ?? {}}
-  __set_state(next)
+pub fn init(harness: Harness, ctx = nil) {
+  const next = __state(harness) + {initialized: true, ctx: ctx ?? {}}
+  __set_state(harness, next)
   return next
 }
 
 /** Activate configured trigger bindings. */
-pub fn activate(bindings = []) {
+pub fn activate(harness: Harness, bindings = []) {
   let by_id = {}
   let seen_paths = {}
   for binding in bindings ?? [] {
@@ -107,8 +107,8 @@ pub fn activate(bindings = []) {
     }
     by_id[binding_id] = binding + {binding_id: binding_id}
   }
-  const next = __state() + {bindings: by_id, active: true}
-  __set_state(next)
+  const next = __state(harness) + {bindings: by_id, active: true}
+  __set_state(harness, next)
   return {provider: PROVIDER_ID, bindings: len(by_id.keys())}
 }
 
@@ -120,15 +120,15 @@ pub fn activate(bindings = []) {
  * untrusted pipeline nodes or external callers. Full caller-identity gating is tracked as a
  * host responsibility.
  */
-pub fn shutdown() {
-  store_delete(STATE_KEY)
-  store_delete(RATE_LIMIT_STATE_KEY)
+pub fn shutdown(harness: Harness) {
+  harness.runtime.store_delete(STATE_KEY)
+  harness.runtime.store_delete(RATE_LIMIT_STATE_KEY)
   return {provider: PROVIDER_ID, active: false}
 }
 
 @complexity(allow)
 /** Verify and normalize an inbound webhook request. */
-pub fn normalize_inbound(raw) {
+pub fn normalize_inbound(harness: Harness, raw) {
   const headers = raw?.headers ?? {}
   // Resolve the signed surface (raw bytes preferred over body_text) before parsing JSON so an
   // unsigned/oversized payload cannot exhaust the parser ahead of signature verification.
@@ -137,7 +137,7 @@ pub fn normalize_inbound(raw) {
     return __reject_err(unwrap_err(signed))
   }
   const body_text = unwrap(signed)
-  const verified = __verify_signature(raw, headers, body_text)
+  const verified = __verify_signature(harness, raw, headers, body_text)
   if is_err(verified) {
     return __reject_err(unwrap_err(verified))
   }
@@ -170,7 +170,7 @@ pub fn normalize_inbound(raw) {
 
 @complexity(allow)
 /** Dispatch a supported outbound helper method. */
-pub fn call(method, args = {}) {
+pub fn call(harness: Harness, method, args = {}) {
   if !contains(OUTBOUND_METHODS, method) {
     return __err(
       "method_not_found",
@@ -178,16 +178,17 @@ pub fn call(method, args = {}) {
     )
   }
   if method == "api.request" {
-    return __api_request(args ?? {})
+    return __api_request(harness, args ?? {})
   }
   if method == "pull_requests.list" {
-    return __paginate_list(args, "/repos/" + __repo_ref(args) + "/pulls")
+    return __paginate_list(harness, args, "/repos/" + __repo_ref(args) + "/pulls")
   }
   if method == "pull_requests.comment" {
-    return __comment_post(args, __pull_request_comment_path(args))
+    return __comment_post(harness, args, __pull_request_comment_path(args))
   }
   if method == "pull_requests.update" {
     return __api_request(
+      harness,
       args
         + {
         method: "PATCH",
@@ -200,13 +201,14 @@ pub fn call(method, args = {}) {
     )
   }
   if method == "issues.list" {
-    return __paginate_list(args, "/repos/" + __repo_ref(args) + "/issues")
+    return __paginate_list(harness, args, "/repos/" + __repo_ref(args) + "/issues")
   }
   if method == "issues.comment" {
-    return __comment_post(args, __issue_comment_path(args))
+    return __comment_post(harness, args, __issue_comment_path(args))
   }
   if method == "commit_status.set" {
     return __api_request(
+      harness,
       args
         + {
         method: "POST",
@@ -215,15 +217,24 @@ pub fn call(method, args = {}) {
       },
     )
   }
-  return __api_request(args + {method: "GET", path: args?.path ?? __repository_file_path(args)})
+  return __api_request(
+    harness,
+    args + {method: "GET", path: args?.path ?? __repository_file_path(args)},
+  )
 }
 
-fn __state() {
-  return store_get(STATE_KEY) ?? {initialized: false, active: false, bindings: {}, ctx: {}}
+fn __state(harness: Harness) {
+  return harness.runtime.store_get(STATE_KEY)
+    ?? {
+    initialized: false,
+    active: false,
+    bindings: {},
+    ctx: {},
+  }
 }
 
-fn __set_state(state) {
-  store_set(STATE_KEY, state)
+fn __set_state(harness: Harness, state) {
+  harness.runtime.store_set(STATE_KEY, state)
   return state
 }
 
@@ -292,7 +303,7 @@ fn __supports_event(event) {
   return false
 }
 
-fn __verify_signature(raw, headers, body_text) {
+fn __verify_signature(harness: Harness, raw, headers, body_text) {
   const binding_id = raw?.metadata?.binding_id ?? raw?.binding_id
   if binding_id == nil || trim(to_string(binding_id)) == "" {
     return __err(
@@ -300,7 +311,7 @@ fn __verify_signature(raw, headers, body_text) {
       "request did not include a binding_id; cannot resolve secret",
     )
   }
-  const secret = __signing_secret(raw)
+  const secret = __signing_secret(harness, raw)
   // Fail-closed: refuse delivery when no signing secret is configured for this binding.
   if secret == nil || trim(to_string(secret)) == "" {
     return __err("missing_signature", "no signing secret configured for this binding")
@@ -350,8 +361,8 @@ fn __signed_surface(raw) {
  * must not feed the HMAC key. binding_id is required upstream; we refuse the single-binding
  * fallback so that secrets are never resolved without an explicit binding pointer.
  */
-fn __signing_secret(raw) {
-  const state = __state()
+fn __signing_secret(harness: Harness, raw) {
+  const state = __state(harness)
   const ctx_secret = state?.ctx?.signing_secret ?? state?.ctx?.secrets?.signing_secret
   if ctx_secret != nil && trim(to_string(ctx_secret)) != "" {
     return to_string(ctx_secret)
@@ -368,7 +379,7 @@ fn __signing_secret(raw) {
   if bound != nil && trim(to_string(bound)) != "" {
     return to_string(bound)
   }
-  const env_secret = __env_get(ENV_PREFIX + "_SIGNING_SECRET")
+  const env_secret = __env_get(harness, ENV_PREFIX + "_SIGNING_SECRET")
   if env_secret != nil && trim(to_string(env_secret)) != "" {
     return to_string(env_secret)
   }
@@ -647,7 +658,7 @@ fn __normalized_headers(headers) {
   return normalized
 }
 
-fn __outbound_config(args) {
+fn __outbound_config(harness: Harness, args) {
   const env_base = ENV_PREFIX + "_API_BASE_URL"
   const env_token = ENV_PREFIX + "_TOKEN"
   const api_base_url = args?.api_base_url ?? harness.env.get_or(env_base, DEFAULT_API_BASE_URL)
@@ -655,11 +666,11 @@ fn __outbound_config(args) {
     ?? args
     ?.app_password
     ?? args?.secrets?.access_token
-    ?? __env_get(env_token)
+    ?? __env_get(harness, env_token)
   return Ok({api_base_url: to_string(api_base_url), access_token: access_token})
 }
 
-fn __env_get(name) {
+fn __env_get(harness: Harness, name) {
   const resolved = try {
     harness.env.get(name)
   }
@@ -700,15 +711,15 @@ fn __rate_limit_config(args) {
   }
 }
 
-fn __rate_limit_acquire(args) {
+fn __rate_limit_acquire(harness: Harness, args) {
   const cfg = __rate_limit_config(args)
   if cfg.disabled {
     return Ok(true)
   }
-  let buckets = store_get(RATE_LIMIT_STATE_KEY) ?? {}
+  let buckets = harness.runtime.store_get(RATE_LIMIT_STATE_KEY) ?? {}
   const result = rate_limit_token_bucket(buckets.get(cfg.scope), cfg, nil)
   buckets[cfg.scope] = result.state
-  store_set(RATE_LIMIT_STATE_KEY, buckets)
+  harness.runtime.store_set(RATE_LIMIT_STATE_KEY, buckets)
   if result.allowed {
     return Ok(true)
   }
@@ -719,11 +730,11 @@ fn __rate_limit_acquire(args) {
       PROVIDER_ID + " local rate limit would block for " + to_string(wait_ms / 1000) + "s",
     )
   }
-  sleep(wait_ms)
+  harness.clock.sleep_ms(wait_ms)
   return Ok(true)
 }
 
-fn __maybe_wait_for_provider_rate_limit(response) {
+fn __maybe_wait_for_provider_rate_limit(harness: Harness, response) {
   const remaining = __header(response.headers ?? {}, "x-ratelimit-remaining")
   if remaining == nil || trim(to_string(remaining)) != "0" {
     return Ok(false)
@@ -747,7 +758,7 @@ fn __maybe_wait_for_provider_rate_limit(response) {
     )
   }
   if wait_seconds > 0 {
-    sleep(wait_seconds * 1000)
+    harness.clock.sleep_ms(wait_seconds * 1000)
   }
   return Ok(true)
 }
@@ -760,8 +771,8 @@ fn __is_rate_limit_response(response) {
   return remaining != nil && trim(to_string(remaining)) == "0"
 }
 
-fn __api_request(args) {
-  const response = __api_request_full(args ?? {})
+fn __api_request(harness: Harness, args) {
+  const response = __api_request_full(harness, args ?? {})
   if is_err(response) {
     return response
   }
@@ -773,13 +784,13 @@ fn __api_request(args) {
 }
 
 @complexity(allow)
-fn __api_request_full(args) {
-  const config = __outbound_config(args ?? {})
+fn __api_request_full(harness: Harness, args) {
+  const config = __outbound_config(harness, args ?? {})
   if is_err(config) {
     return config
   }
   const cfg = unwrap(config)
-  const permit = __rate_limit_acquire(args ?? {})
+  const permit = __rate_limit_acquire(harness, args ?? {})
   if is_err(permit) {
     return permit
   }
@@ -798,11 +809,11 @@ fn __api_request_full(args) {
     options["body"] = json_stringify(args.body)
     options.headers["Content-Type"] = "application/json"
   }
-  return __dispatch_with_rate_limit(method, url, options)
+  return __dispatch_with_rate_limit(harness, method, url, options)
 }
 
 @complexity(allow)
-fn __dispatch_with_rate_limit(method, url, options) {
+fn __dispatch_with_rate_limit(harness: Harness, method, url, options) {
   let retried = false
   while true {
     const response_result = try {
@@ -812,7 +823,7 @@ fn __dispatch_with_rate_limit(method, url, options) {
       return __err("transport", to_string(unwrap_err(response_result)))
     }
     const response = unwrap(response_result)
-    const waited = __maybe_wait_for_provider_rate_limit(response)
+    const waited = __maybe_wait_for_provider_rate_limit(harness, response)
     if is_err(waited) {
       return waited
     }
@@ -851,7 +862,7 @@ fn __dispatch_with_rate_limit(method, url, options) {
 }
 
 @complexity(allow)
-fn __paginate_list(args, default_path) {
+fn __paginate_list(harness: Harness, args, default_path) {
   const base_path = args?.path ?? default_path
   const max_pages = args?.max_pages ?? MAX_PAGINATION_PAGES
   const initial_url = base_path + __pagination_query(args)
@@ -859,19 +870,19 @@ fn __paginate_list(args, default_path) {
   const result = paginate_cursor(
     initial_url,
     { url, cursor ->
-      let target_path = cursor ?? url
-      let response = __api_request_full(args + {method: "GET", path: target_path})
+      const target_path = cursor ?? url
+      const response = __api_request_full(harness, args + {method: "GET", path: target_path})
       if is_err(response) {
         return {items: [], _next_cursor: nil, _error: unwrap_err(response)}
       }
-      let unwrapped = unwrap(response)
-      let body = unwrapped.body
-      let items = if type_of(body) == "list" {
+      const unwrapped = unwrap(response)
+      const body = unwrapped.body
+      const items = if type_of(body) == "list" {
         body
       } else {
         body?.data ?? body?.items ?? body?.results ?? []
       }
-      let next = __next_page_cursor(unwrapped, args, base_path, current_page)
+      const next = __next_page_cursor(harness, unwrapped, args, base_path, current_page)
       current_page = current_page + 1
       return {items: items, _next_cursor: next}
     },
@@ -895,12 +906,12 @@ fn __paginate_list(args, default_path) {
 // caller passed an explicit `limit`/`per_page`, fall back to incrementing `?page=` so older
 // deployments still page through results when the body comes back full.
 @complexity(allow)
-fn __next_page_cursor(response, args, base_path, current_page) {
+fn __next_page_cursor(harness: Harness, response, args, base_path, current_page) {
   const link = __header(response.headers ?? {}, "link")
   if link != nil && link != "" {
     const next = __link_header_next(link)
     if next != nil {
-      return __relative_path(next, __outbound_base_url(args))
+      return __relative_path(next, __outbound_base_url(harness, args))
     }
   }
   const limit = args?.limit ?? args?.per_page
@@ -919,7 +930,7 @@ fn __next_page_cursor(response, args, base_path, current_page) {
   return base_path + __pagination_query(args + {page: current_page + 1, limit: limit})
 }
 
-fn __outbound_base_url(args) {
+fn __outbound_base_url(harness: Harness, args) {
   return args?.api_base_url
     ?? harness.env.get_or(ENV_PREFIX + "_API_BASE_URL", DEFAULT_API_BASE_URL)
 }
@@ -1024,8 +1035,9 @@ fn __repo_ref(args) {
  * computed path; `args.comment` is accepted as an alias for `args.body`. Shared
  * by `pull_requests.comment` and `issues.comment`, which only differ in path.
  */
-fn __comment_post(args, default_path) {
+fn __comment_post(harness: Harness, args, default_path) {
   return __api_request(
+    harness,
     args
       + {
       method: "POST",

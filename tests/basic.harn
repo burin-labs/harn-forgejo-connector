@@ -10,14 +10,15 @@ import {
 } from "../src/lib"
 
 @complexity(allow)
-pipeline default() {
-  shutdown()
+pipeline default(harness: Harness) {
+  shutdown(harness)
   assert_eq(provider_id(), "forgejo", "provider id")
   assert_eq(kinds()[0], "webhook", "first kind")
   assert_eq(payload_schema().harn_schema_name, "ForgejoEventPayload", "schema")
   // Seed the signing secret via init/activate — never via inbound `raw.*` fields.
-  init({signing_secret: "secret"})
+  init(harness, {signing_secret: "secret"})
   const activated = activate(
+    harness,
     [{id: "primary", path: "/hooks/forgejo", secrets: {signing_secret: "secret"}}],
   )
   assert_eq(activated.bindings, 1, "activation count")
@@ -30,12 +31,13 @@ pipeline default() {
     body_text: body,
     headers: headers + {"x-gitea-signature": signature},
   }
-  const normalized = normalize_inbound(raw)
+  const normalized = normalize_inbound(harness, raw)
   assert_eq(normalized.type, "event", "envelope type")
   assert_eq(normalized.event.kind, "pull_request.opened", "event kind")
   assert_eq(normalized.event.signature_status.state, "verified", "signed status")
   assert(normalized.event.dedupe_key != nil && normalized.event.dedupe_key != "", "dedupe key")
   const raw_hex = normalize_inbound(
+    harness,
     {
       binding_id: "primary",
       body_text: body,
@@ -44,16 +46,19 @@ pipeline default() {
   )
   assert_eq(raw_hex.event.signature_status.state, "verified", "raw-hex signature accepted")
   const bad_signature = normalize_inbound(
+    harness,
     {binding_id: "primary", body_text: body, headers: headers + {"x-gitea-signature": "sha256=00"}},
   )
   assert_eq(bad_signature.type, "reject", "bad signature rejects")
   assert_eq(bad_signature.reject.status, 401, "bad signature status")
   const missing_signature = normalize_inbound(
+    harness,
     {binding_id: "primary", body_text: body, headers: headers},
   )
   assert_eq(missing_signature.type, "reject", "missing signature rejects")
   assert_eq(missing_signature.reject.status, 401, "missing signature status")
   const invalid_json = normalize_inbound(
+    harness,
     {
       binding_id: "primary",
       body_text: "{bad json",
@@ -62,6 +67,7 @@ pipeline default() {
   )
   assert_eq(invalid_json.type, "reject", "invalid json rejects")
   const unsupported = normalize_inbound(
+    harness,
     {
       binding_id: "primary",
       body_text: "{}",
@@ -74,12 +80,14 @@ pipeline default() {
   assert_eq(unsupported.type, "reject", "unsupported event rejects")
   // F8: missing binding_id is fail-closed.
   const no_binding = normalize_inbound(
+    harness,
     {body_text: body, headers: headers + {"x-gitea-signature": signature}},
   )
   assert_eq(no_binding.type, "reject", "missing binding_id rejects")
   assert_eq(no_binding.reject.status, 400, "missing binding_id 400")
   // F1: absolute-URL path in api.request is rejected (SSRF guard).
   const ssrf = call(
+    harness,
     "api.request",
     {
       api_base_url: "https://codeberg.org/api/v1",
@@ -89,14 +97,15 @@ pipeline default() {
     },
   )
   assert(is_err(ssrf), "absolute URL path rejected")
-  egress_policy({allow: ["codeberg.org"], default: "deny"})
-  http_mock_clear()
-  http_mock(
+  harness.net.egress_policy({allow: ["codeberg.org"], default: "deny"})
+  harness.testing.http_mock_clear()
+  harness.testing.http_mock(
     "GET",
     "https://codeberg.org/api/v1/projects",
     {status: 200, body: json_stringify({ok: true})},
   )
   const response = call(
+    harness,
     "api.request",
     {
       api_base_url: "https://codeberg.org/api/v1",
@@ -106,8 +115,8 @@ pipeline default() {
     },
   )
   assert_eq(response.ok, true, "api request returns parsed body")
-  const unsupported_method = call("unknown", {})
+  const unsupported_method = call(harness, "unknown", {})
   assert(is_err(unsupported_method), "unknown method errors")
-  http_mock_clear()
-  shutdown()
+  harness.testing.http_mock_clear()
+  shutdown(harness)
 }
