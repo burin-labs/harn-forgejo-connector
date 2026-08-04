@@ -3,7 +3,7 @@ import { call, shutdown } from "../src/lib"
 const API = "https://codeberg.org/api/v1"
 
 @complexity(allow)
-pipeline default(harness: Harness) {
+pipeline test_rate_limit_and_pagination(harness: Harness) {
   shutdown(harness)
   harness.net.egress_policy({allow: ["codeberg.org"], default: "deny"})
   __test_rate_limit_429_retry(harness)
@@ -32,12 +32,12 @@ fn __test_preemptive_token_bucket(harness: Harness) {
     rate_limit: {capacity: 1, refill_tokens: 1, refill_interval_ms: 3600000, scope: "exhaust"},
   }
   const first = call(harness, "api.request", bucket_args)
-  assert_eq(first.id, 1, "first call consumes the only available token")
+  expect_eq(first.id, 1, "first call consumes the only available token")
   // The next acquire would block for the full refill window; the connector returns rate_limited
   // instead of sleeping past the configured ceiling.
   const second = call(harness, "api.request", bucket_args)
-  assert(is_err(second), "preemptive bucket throttles the second call")
-  assert_eq(unwrap_err(second).code, "rate_limited", "throttle uses the rate_limited code")
+  expect(is_err(second), "preemptive bucket throttles the second call")
+  expect_eq(unwrap_err(second).code, "rate_limited", "throttle uses the rate_limited code")
   shutdown(harness)
 }
 
@@ -67,7 +67,7 @@ fn __test_rate_limit_429_retry(harness: Harness) {
       rate_limit: {disabled: true},
     },
   )
-  assert_eq(result.id, 101, "429 triggers a single retry that succeeds")
+  expect_eq(result.id, 101, "429 triggers a single retry that succeeds")
 }
 
 @complexity(allow)
@@ -93,7 +93,7 @@ fn __test_rate_limit_remaining_zero_retry(harness: Harness) {
       rate_limit: {disabled: true},
     },
   )
-  assert_eq(result.id, 1, "remaining=0 with elapsed reset returns the body without erroring")
+  expect_eq(result.id, 1, "remaining=0 with elapsed reset returns the body without erroring")
 }
 
 @complexity(allow)
@@ -119,11 +119,11 @@ fn __test_rate_limit_reset_too_far(harness: Harness) {
       rate_limit: {disabled: true},
     },
   )
-  assert(
+  expect(
     is_err(result),
     "rate limit reset further than the configured wait window returns an error",
   )
-  assert_eq(unwrap_err(result).code, "rate_limited", "error code is rate_limited")
+  expect_eq(unwrap_err(result).code, "rate_limited", "error code is rate_limited")
 }
 
 @complexity(allow)
@@ -160,10 +160,10 @@ fn __test_pagination_link_header(harness: Harness) {
       rate_limit: {disabled: true},
     },
   )
-  assert_eq(len(result.items), 3, "items collected across two pages")
-  assert_eq(result.pages, 2, "two pages fetched")
-  assert_eq(result.complete, true, "pagination ran to completion")
-  assert_eq(result.items[2].title, "third", "page 2 items present")
+  expect_eq(len(result.items), 3, "items collected across two pages")
+  expect_eq(result.pages, 2, "two pages fetched")
+  expect_eq(result.complete, true, "pagination ran to completion")
+  expect_eq(result.items[2].title, "third", "page 2 items present")
 }
 
 @complexity(allow)
@@ -194,8 +194,8 @@ fn __test_pagination_fallback_page_param(harness: Harness) {
       rate_limit: {disabled: true},
     },
   )
-  assert_eq(len(result.items), 3, "page param fallback collects items when Link is absent")
-  assert_eq(result.complete, true, "pagination completes once a partial page is returned")
+  expect_eq(len(result.items), 3, "page param fallback collects items when Link is absent")
+  expect_eq(result.complete, true, "pagination completes once a partial page is returned")
 }
 
 @complexity(allow)
@@ -218,7 +218,24 @@ fn __test_pagination_single_page(harness: Harness) {
       rate_limit: {disabled: true},
     },
   )
-  assert_eq(len(result.items), 1, "single short page completes immediately")
-  assert_eq(result.pages, 1, "exactly one fetch")
-  assert_eq(result.complete, true, "single page is complete")
+  expect_eq(len(result.items), 1, "single short page completes immediately")
+  expect_eq(result.pages, 1, "exactly one fetch")
+  expect_eq(result.complete, true, "single page is complete")
+}
+
+/**
+ * Require that a smoke-test condition holds. Helper `fn`s are not test
+ * pipelines, so `assert` does not belong here (HARN-LNT-025).
+ */
+fn expect(condition, message = "expectation failed") {
+  require condition, message
+}
+
+/** Require that two smoke-test values are equal, reporting both on failure. */
+fn expect_eq(actual, expected, message = "values differ") {
+  require actual == expected,
+    message + ": expected " + to_string(expected) + ", got "
+    + to_string(
+    actual,
+  )
 }
