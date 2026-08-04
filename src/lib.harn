@@ -228,13 +228,13 @@ pub fn call(harness: Harness, method, args = {}) {
   )
 }
 
-fn __state(harness: HarnessRuntime) {
-  return harness.store_get(STATE_KEY)
+fn __state(runtime: HarnessRuntime) {
+  return runtime.store_get(STATE_KEY)
     ?? {initialized: false, active: false, bindings: {}, ctx: {}}
 }
 
-fn __set_state(harness: HarnessRuntime, state) {
-  harness.store_set(STATE_KEY, state)
+fn __set_state(runtime: HarnessRuntime, state) {
+  runtime.store_set(STATE_KEY, state)
   return state
 }
 
@@ -663,21 +663,21 @@ fn __normalized_headers(headers) {
   return normalized
 }
 
-fn __outbound_config(harness: HarnessEnv, args) {
+fn __outbound_config(env: HarnessEnv, args) {
   const env_base = ENV_PREFIX + "_API_BASE_URL"
   const env_token = ENV_PREFIX + "_TOKEN"
-  const api_base_url = args?.api_base_url ?? harness.get_or(env_base, DEFAULT_API_BASE_URL)
+  const api_base_url = args?.api_base_url ?? env.get_or(env_base, DEFAULT_API_BASE_URL)
   const access_token = args?.access_token ?? args?.token ?? args?.personal_access_token
     ?? args
     ?.app_password
     ?? args?.secrets?.access_token
-    ?? __env_get(harness, env_token)
+    ?? __env_get(env, env_token)
   return Ok({api_base_url: to_string(api_base_url), access_token: access_token})
 }
 
-fn __env_get(harness: HarnessEnv, name) {
+fn __env_get(env: HarnessEnv, name) {
   const resolved = try {
-    harness.get(name)
+    env.get(name)
   }
   if is_err(resolved) {
     return nil
@@ -739,7 +739,7 @@ fn __rate_limit_acquire(harness: {clock: HarnessClock, runtime: HarnessRuntime},
   return Ok(true)
 }
 
-fn __maybe_wait_for_provider_rate_limit(harness: HarnessClock, response) {
+fn __maybe_wait_for_provider_rate_limit(clock: HarnessClock, response) {
   const remaining = __header(response.headers ?? {}, "x-ratelimit-remaining")
   if remaining == nil || trim(to_string(remaining)) != "0" {
     return Ok(false)
@@ -754,7 +754,7 @@ fn __maybe_wait_for_provider_rate_limit(harness: HarnessClock, response) {
   if is_err(parsed_reset) {
     return Ok(true)
   }
-  const wait_seconds = unwrap(parsed_reset) - to_int(harness.timestamp())
+  const wait_seconds = unwrap(parsed_reset) - to_int(clock.timestamp())
   if wait_seconds > MAX_RATE_LIMIT_WAIT_SECONDS {
     return __err(
       "rate_limited",
@@ -763,7 +763,7 @@ fn __maybe_wait_for_provider_rate_limit(harness: HarnessClock, response) {
     )
   }
   if wait_seconds > 0 {
-    harness.sleep_ms(wait_seconds * 1000)
+    clock.sleep_ms(wait_seconds * 1000)
   }
   return Ok(true)
 }
@@ -916,12 +916,12 @@ fn __paginate_list(harness: Harness, args, default_path) {
 // caller passed an explicit `limit`/`per_page`, fall back to incrementing `?page=` so older
 // deployments still page through results when the body comes back full.
 @complexity(allow)
-fn __next_page_cursor(harness: HarnessEnv, response, args, base_path, current_page) {
+fn __next_page_cursor(env: HarnessEnv, response, args, base_path, current_page) {
   const link = __header(response.headers ?? {}, "link")
   if link != nil && link != "" {
     const next = __link_header_next(link)
     if next != nil {
-      return __relative_path(next, __outbound_base_url(harness, args))
+      return __relative_path(next, __outbound_base_url(env, args))
     }
   }
   const limit = args?.limit ?? args?.per_page
@@ -940,9 +940,9 @@ fn __next_page_cursor(harness: HarnessEnv, response, args, base_path, current_pa
   return base_path + __pagination_query(args + {page: current_page + 1, limit: limit})
 }
 
-fn __outbound_base_url(harness: HarnessEnv, args) {
+fn __outbound_base_url(env: HarnessEnv, args) {
   return args?.api_base_url
-    ?? harness.get_or(ENV_PREFIX + "_API_BASE_URL", DEFAULT_API_BASE_URL)
+    ?? env.get_or(ENV_PREFIX + "_API_BASE_URL", DEFAULT_API_BASE_URL)
 }
 
 fn __link_header_next(link) {
