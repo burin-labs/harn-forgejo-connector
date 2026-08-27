@@ -227,12 +227,12 @@ fn __test_pagination_single_page(harness: Harness) {
  * Require that a smoke-test condition holds. Helper `fn`s are not test
  * pipelines, so `assert` does not belong here (HARN-LNT-025).
  */
-fn expect(condition, message = "expectation failed") {
+fn expect(condition: any, message: any = "expectation failed") {
   require condition, message
 }
 
 /** Require that two smoke-test values are equal, reporting both on failure. */
-fn expect_eq(actual, expected, message = "values differ") {
+fn expect_eq(actual: any, expected: any, message: any = "values differ") {
   require actual == expected,
     message + ": expected " + to_string(expected) + ", got "
     + to_string(actual)
