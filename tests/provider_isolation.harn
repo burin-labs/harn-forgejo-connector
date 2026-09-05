@@ -1,0 +1,35 @@
+import { init, normalize_inbound, shutdown } from "../src/lib"
+import * as gitea from "harn-gitea-connector/default"
+
+pipeline test_provider_isolation(harness: Harness) {
+  gitea.shutdown(harness)
+  shutdown(harness)
+  gitea.init(harness, {signing_secret: "gitea-test-secret"})
+  init(harness, {signing_secret: "forgejo-test-secret"})
+  const raw = {
+    binding_id: "primary",
+    body_text: "{}",
+    headers: {"x-gitea-event": "push", "x-forgejo-delivery": "forgejo-delivery"},
+  }
+  const gitea_raw = raw
+    + {
+      headers: raw.headers + {"x-gitea-signature": hmac_sha256("gitea-test-secret", raw.body_text)},
+    }
+  const forgejo_raw = raw
+    + {
+      headers: raw.headers
+        + {"x-gitea-signature": hmac_sha256("forgejo-test-secret", raw.body_text)},
+    }
+  const gitea_event = gitea.normalize_inbound(harness, gitea_raw)
+  const forgejo = normalize_inbound(harness, forgejo_raw)
+  assert_eq(gitea_event.type, "event")
+  assert_eq(forgejo.type, "event")
+  assert_eq(forgejo.event.dedupe_key, "forgejo:push:forgejo-delivery")
+  assert_eq(gitea_event.event.payload.resource, {revision: nil, changed_paths: nil, commits: nil})
+  assert_eq(forgejo.event.payload.resource, nil)
+  assert_eq(normalize_inbound(harness, gitea_raw).reject.status, 401)
+  shutdown(harness)
+  assert_eq(gitea.normalize_inbound(harness, gitea_raw).type, "event")
+  assert_eq(normalize_inbound(harness, forgejo_raw).reject.status, 401)
+  gitea.shutdown(harness)
+}

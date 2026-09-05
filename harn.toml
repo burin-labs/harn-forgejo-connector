@@ -41,6 +41,7 @@ inaccessible_resource = "Confirm the token can access the target Forgejo host, o
 transient_provider_outage = "Retry after the Forgejo host API and webhook endpoints are healthy."
 
 [dependencies]
+harn-gitea-connector = { git = "https://github.com/burin-labs/harn-gitea-connector", rev = "2c8b0a06a73ad5e533395a598694b6bbf4306e99" }
 
 [connector_contract]
 version = 1
