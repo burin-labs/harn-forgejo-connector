@@ -239,7 +239,7 @@ fn __api_request_full(harness: Harness, args: any) {
     return config
   }
   const cfg = unwrap(config)
-  const permit = __rate_limit_acquire({clock: harness.clock, runtime: harness.runtime}, args ?? {})
+  const permit = __rate_limit_acquire(pick(harness, ["clock", "runtime"]), args ?? {})
   if is_err(permit) {
     return permit
   }
@@ -258,7 +258,7 @@ fn __api_request_full(harness: Harness, args: any) {
     options["body"] = json_stringify(args.body)
     options.headers["Content-Type"] = "application/json"
   }
-  return __dispatch_with_rate_limit({clock: harness.clock, net: harness.net}, method, url, options)
+  return __dispatch_with_rate_limit(pick(harness, ["clock", "net"]), method, url, options)
 }
 
 @complexity(allow)
